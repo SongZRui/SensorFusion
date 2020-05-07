@@ -1,157 +1,132 @@
-import random
+#!/usr/bin/env python3
+from lidar_observation import LidarObservation
+import copy
 import numpy as np
-import matplotlib.pyplot as plt
-import copy.copy
 
 
-class RadarTrajectory:
-    def __init__(self, ego, obj, R_sigma=0.1, range_v_sigma=0.01, theta_sigma=0.1 / 180.0 * np.pi, lat_v_sigma=0.1):
-        random.seed(1001) # for repeatable result
-        self._ego = copy.copy(ego)
-        self._obj = copy.copy(obj)
-        self._R = self.generate_R()
-        self._theta, self._range_v, self._lat_v = self.generate_theta_range_v()
-        self.add_noise(self._R, sigma = R_sigma)
-        self.add_noise(self._range_v, sigma=range_v_sigma)
-        self.add_noise(self._lat_v, sigma=lat_v_sigma)
-        self.add_noise(self._theta, sigma = theta_sigma)
-        self._obj_position_world, self._obj_velocity_world = self.obs2world(R=self._R, theta=self._theta,
-                                                                            range_v=self._range_v, lat_v=self._lat_v)
-#         self._range_v = np.asarray(range_velocity)
-        self._timestamp = self._ego.get_timestamps()
+class RadarObservation:
+    def __init__(self, R, theta, r_v, l_v, Twr, r_a=0.0):
+        self._R = copy.copy(R)
+        self._theta = copy.copy(theta)
+        self._r_v = copy.copy(r_v)
+        self._l_v = copy.copy(l_v)
+        self._Twr = np.array(copy.copy(Twr))
+        self._Rwr = self._Twr[:2, :2]
+        self._twr = self._Twr[:2, 2]
 
-    def generate_R(self):
-        # generate range observation, and this is only relative to position difference
-        R = self._ego.get_position() - self._obj.get_position()
-        R = np.linalg.norm(R, axis=0)
-        return R
+        ct = np.cos(self._theta)
+        st = np.sin(self._theta)
+        self._local_x = self._R * ct
+        self._local_y = self._R * st
+        self._local_vx = self._r_v * ct - self._l_v * st
+        self._local_vy = self._r_v * st + self._l_v * ct
+        local = np.array([self._local_x, self._local_y])
+        global_ = self._Rwr @ local + self._twr
+        self._global_x = global_[0]
+        self._global_y = global_[1]
+        local = np.array([self._local_vx, self._local_vy])
+        global_ = self._Rwr @ local
+        self._global_vx = global_[0]
+        self._global_vy = global_[0]
 
-    def calculate_ori_in_world_coordinate(self, traj):
-        velocity = traj.get_velocity()
-        orientations = [ np.arctan2(velocity[1][i], velocity[0][i]) for i in range(len(velocity[0]))]
-        positions = traj.get_position()
+    def get_radar_measurement(self):
+        return np.array([self._R, self._theta, self._r_v, self._l_v])
 
-        poses = [[[np.cos(orientations[i]), -np.sin(orientations[i]), positions[0][i]],
-                  [np.sin(orientations[i]), np.cos(orientations[i]), positions[1][i]],
-                  [0.0, 0.0, 1.0]] for i in range(len(orientations))]
-        poses = np.asarray(poses)
-        oris = [[[np.cos(orientations[i]), -np.sin(orientations[i])],
-                    [np.sin(orientations[i]), np.cos(orientations[i])]] for i in range(len(orientations))]
-        oris = np.array(oris)
-        return oris, poses
+    def get_lidar_format_measurement(self):
+        return LidarObservation(self._local_x, self._local_y, self._local_vx, self._local_vy, self._Twr)
 
-    def generate_theta_range_v(self):
-        # return obj position and absolute velocity in ego car coodinate
-        # ego car coordinate is defined as followed:
-        #    x axis points to the front of ego car
-        #    y axis points to the right of ego car
-        #    assume ego car orientation is always same as velocity direction
-        # ego_oris: N * 2 * 2, where N is number of frames
-        self.ego_oris, self.poses = self.calculate_ori_in_world_coordinate(self._ego)
-        # diff_position_in_world: N * 2
-        diff_position_in_world = (self._obj.get_position() - self._ego.get_position()).transpose()
-        # diff_position_in_ego: N * 2
-        diff_position_in_ego = np.array([self.ego_oris[i].transpose() @ diff_position_in_world[i].transpose()
-                                             for i in range(len(diff_position_in_world))])
+    @staticmethod
+    def draw_radar_obss(obss, show=True, fig=None, label=""):
+        '''obss should be a seriase of radar observation on same object'''
+        import matplotlib.pyplot as plt
+        if fig is None:
+            fig = plt.figure(figsize=(16, 18))
+        thetas = [obs._theta for obs in obss]
+        index = [i for i in range(len(thetas))]
+        ax = fig.add_subplot(3, 4, 1)
+        ax.set_title("radar theta(rad)")
+        ax.set_ylabel("rad")
+        ax.plot(index, thetas, marker='.')
 
-        observing_angles = [np.arctan2(diff_position_in_ego[i][1], diff_position_in_ego[i][0])
-                                for i in range(len(diff_position_in_ego))]
-        observing_angles = np.array(observing_angles)
+        Rs = [obs._R for obs in obss]
+        ax = fig.add_subplot(3, 4, 2)
+        ax.set_title("radar range(m)")
+        ax.set_ylabel("m")
+        ax.plot(index, Rs, marker='.')
 
-        obj_velocity_world_coor = self._obj.get_velocity()
-        obj_velocity_ego_coor = np.array([self.ego_oris[i].transpose() @ obj_velocity_world_coor[:, i]
-                                              for i in range(len(obj_velocity_world_coor[0]))])
+        r_vs = [obs._r_v for obs in obss]
+        ax = fig.add_subplot(3, 4, 3)
+        ax.set_title("radar range velocity(m/s)")
+        ax.set_ylabel("m/s")
+        ax.plot(index, r_vs, marker='.')
 
-        range_v = [np.cos(observing_angles[i]) * obj_velocity_ego_coor[i][0] + np.sin(observing_angles[i]) * obj_velocity_ego_coor[i][1]
-                        for i in range(len(obj_velocity_ego_coor))]
-        range_v = np.array(range_v)
+        l_vs = [obs._l_v for obs in obss]
+        ax = fig.add_subplot(3, 4, 4)
+        ax.set_title("radar lateral velocity(m/s)")
+        ax.set_ylabel("m/s")
+        ax.plot(index, l_vs, marker='.')
 
-        lat_v = [np.cos(observing_angles[i]) * obj_velocity_ego_coor[i][1] - np.sin(observing_angles[i]) * obj_velocity_ego_coor[i][0]
-                        for i in range(len(obj_velocity_ego_coor))]
-        lat_v = np.asarray(lat_v)
-        return observing_angles, range_v, lat_v
+        local_xs = [obs._local_x for obs in obss]
+        ax = fig.add_subplot(3, 4, 5)
+        ax.set_title("radar local x(m)")
+        ax.set_ylabel("m")
+        ax.plot(index, local_xs, marker='.')
 
-    def add_noise(self, obs, noise_option="const_variance", sigma = 0.3, mu = 0.04):
-        import random
-        if noise_option == "const_variance":
-            for i in range(len(obs)):
-                obs[i] += random.gauss(mu, sigma)
-                obs[i] += random.gauss(mu, sigma)
-        elif noise_option == "variant_variance":
-            for i in range(len(obs)):
-                scale = random.random() * 2
-                sigma = scale * sigma
-                obs[i] += random.gauss(mu, sigma)
-                obs[i] += random.gauss(mu, sigma)
-        elif noise_option == "linear_variance":
-            scale = 1.2
-            N = len(obs)
-            for i in range(len(obs)):
-                sigma_tmp = scale * sigma * float(i) / N
-                obs[i] += random.gauss(mu, sigma_tmp)
-                obs[i] += random.gauss(mu, sigma_tmp)
-        else:
-            print("%s not implemented yes"%noise_option)
+        local_ys = [obs._local_y for obs in obss]
+        ax = fig.add_subplot(3, 4, 6)
+        ax.set_title("radar local y(m)")
+        ax.set_ylabel("m")
+        ax.plot(index, local_ys, marker='.')
 
-    def obs2world(self, theta, R, range_v, lat_v=0.0):
-        xy_local = [[np.cos(theta[i]) * R[i], np.sin(theta[i]) * R[i]] for i in range(len(R))]
-        xy_local = np.array(xy_local).transpose() # in shape (2 * N)
-        ego_xy_world = self._ego.get_position()
-        xy_world = [self.ego_oris[i] @ xy_local[:, i] + ego_xy_world[:, i] for i in range(len(self.ego_oris))]
-        xy_world = np.array(xy_world).transpose()
-        vxvy_local = [[-np.sin(theta[i]) * lat_v[i] + np.cos(theta[i]) * range_v[i],
-                       np.sin(theta[i]) * range_v[i] + np.cos(theta[i]) * lat_v[i]]
-                     for i in range(len(theta))]
-        vxvy_local = np.array(vxvy_local).transpose()
-        vxvy_world = [self.ego_oris[i] @ vxvy_local[:, i] for i in range(len(self.ego_oris))]
-        vxvy_world = np.array(vxvy_world).transpose()
-        return xy_world, vxvy_world
+        local_vxs = [obs._local_vx for obs in obss]
+        ax = fig.add_subplot(3, 4, 7)
+        ax.set_title("radar local x velocity(m/s)")
+        ax.set_ylabel("m/s")
+        ax.plot(index, local_vxs, marker='.')
 
-    def get_thetas(self):
-        return self._theta
-    def get_theta(self,  i):
-        return self._theta[i]
-    def get_Rs(self):
-        return self._R
-    def get_R(self, i):
-        return self._R[i]
-    def get_range_vs(self):
-        return self._range_v
-    def get_range_v(self, i):
-        return self._range_v[i]
-    def get_lat_v(self, i):
-        return self._lat_v[i]
-    def get_timestamps(self):
-        return copy.copy(self._timestamp)
-    def draw_yourself(self, explanation=""):
-        x = np.linspace(0, len(self._R), len(self._R))
-        plt.plot(x, self._R, label = explanation + '-range')
+        local_vys = [obs._local_vy for obs in obss]
+        ax = fig.add_subplot(3, 4, 8)
+        ax.set_title("radar local y velocity(m/s)")
+        ax.set_ylabel("m/s")
+        ax.plot(index, local_vys, marker='.')
+
+        global_xs = [obs._global_x for obs in obss]
+        ax = fig.add_subplot(3, 4, 9)
+        ax.set_title("radar global x(m)")
+        ax.set_ylabel("m")
+        ax.plot(index, global_xs, marker='.')
+
+        global_ys = [obs._global_y for obs in obss]
+        ax = fig.add_subplot(3, 4, 10)
+        ax.set_title("radar global y(m)")
+        ax.set_ylabel("m")
+        ax.plot(index, global_ys, marker='.')
+
+        global_vxs = [obs._global_vx for obs in obss]
+        ax = fig.add_subplot(3, 4, 11)
+        ax.set_title("radar global x velocity(m/s)")
+        ax.set_ylabel("m/s")
+        ax.plot(index, global_vxs, marker='.')
+
+        global_vys = [obs._global_vy for obs in obss]
+        ax = fig.add_subplot(3, 4, 12)
+        ax.set_title("radar global y velocity(m/s)")
+        ax.set_ylabel("m/s")
+        ax.plot(index, global_vys, marker='.', label=label)
         plt.legend()
-        plt.show()
-        plt.plot(x, np.rad2deg(self._theta), label = explanation + '-theta')
-        plt.legend()
-        plt.show()
-        plt.plot(x, self._range_v, label = explanation + '-range_v')
-        plt.legend()
-        plt.show()
-        plt.plot(x, self._lat_v, label = explanation + '-lat_v')
-        plt.legend()
-        plt.show()
-        plt.plot(self._obj_position_world[0], self._obj_position_world[1], label=explanation+'-xy_world')
-        plt.legend()
-        plt.show()
-        plt.plot(x, self._obj_velocity_world[0], label=explanation+'-vx_world')
-        plt.plot(x, self._obj_velocity_world[1], label=explanation+'-vy_world')
-        plt.legend()
-        plt.show()
-def test_radar():
-    obj_motion_pattern = [[0, 0, 3, 0], [0, 0, 0, 0]]
-    obj_traj = Trajectory(3, obj_motion_pattern, 10)
-    obj_traj.draw_yourself(explanation="obj_trajectory")
+        if show == True:
+            plt.show()
+        return fig
 
-    ego_motion_pattern = [[0, 0, 1, 5], [0, 0, 1, 5]]
-    ego_traj = Trajectory(3, ego_motion_pattern, 10)
-    ego_traj.draw_yourself(explanation="ego_trajectory")
-    radar_traj = RadarTrajectory(ego_traj, obj_traj)
-    radar_traj.draw_yourself()
-# test_radar()
+
+def test_radar_observation():
+    Twr = np.identity(3)
+    Twr[0, 2] = 10
+
+    radar1 = RadarObservation(10, 0.3, 3, 2, Twr=Twr)
+    radars = [radar1]
+    RadarObservation.draw_radar_obss(radars)
+
+
+if __name__ == "__main__":
+    test_radar_observation()

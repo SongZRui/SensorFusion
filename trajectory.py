@@ -9,13 +9,14 @@ class Trajectory:
         self._motion_pattern = np.array(motion_pattern)
         self._N = len(self._motion_pattern[0])
         self._hz = hz
-        # self._trajectory (2* N)
-        self._trajectory = self.generate_trajectory()
+        # self._position (2* N)
+        self._position = self.generate_position()
         # self._velocity (2* N)
         self._velocity = self.generate_velocity()
         self._timestamp = [float(i) / self._hz for i in range(self.time_duration * self._hz)]
+        self.calculate_pose_world_coordinate()
 
-    def generate_trajectory(self):
+    def generate_position(self):
         t = [[(i / self._hz) ** n for n in reversed(range(self._N))]
                  for i in range(int(self.time_duration * self._hz))]
         t = np.array(t)
@@ -40,11 +41,28 @@ class Trajectory:
         return copy.copy(self._velocity)
 
     def get_position(self):
-        return copy.copy(self._trajectory)
+        return copy.copy(self._position)
     def get_timestamps(self):
         return copy.copy(self._timestamp)
 
+    def calculate_pose_world_coordinate(self):
+        velocity = self._velocity
+        orientations = [ np.arctan2(velocity[1][i], velocity[0][i]) for i in range(len(velocity[0]))]
+        positions = self._position
+
+        poses = [[[np.cos(orientations[i]), -np.sin(orientations[i]), positions[0][i]],
+                  [np.sin(orientations[i]), np.cos(orientations[i]), positions[1][i]],
+                  [0.0, 0.0, 1.0]] for i in range(len(orientations))]
+        self._poses = np.asarray(poses)
+        oris = [[[np.cos(orientations[i]), -np.sin(orientations[i])],
+                    [np.sin(orientations[i]), np.cos(orientations[i])]] for i in range(len(orientations))]
+        self._oris = np.array(oris)
+
+    def get_warp(self, from_index, to_index):
+        warp = np.linalg.inv(self._poses[to_index]) @ self._poses[from_index]
+        return warp
+
     def draw_yourself(self, explanation=""):
-        plt.plot(self._trajectory[0], self._trajectory[1], marker='.', lw=2, label=explanation)
+        plt.plot(self._position[0], self._position[1], marker='.', lw=2, label=explanation)
         plt.legend()
         plt.show()
